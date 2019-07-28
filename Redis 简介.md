@@ -79,3 +79,48 @@
 - 哈希类型的内部编码有两种：
 - - 1. ziplist(压缩列表): 当哈希类型元素个数小于hash-max-ziplist-entries配置(默认512个)、同时所有值都小于hash-max-ziplist-value配置(默认64字节)时，Redis会使用ziplist作为哈希的内部实现，ziplist使用更加紧凑的解构实现多个元素的连续存储，所以在节省内存方面比hashtable更加优秀
 - - 2. hashtable(哈希表): 当哈希类型无法满足ziplist的条件时，Redis会使用hashtable作为哈希的内部实现，因为此时ziplist的读写效率会下降，而hashtable的读写事件复杂度为O(1),hashtable 会消耗更多内存
+
+> 列表
+
+- 列表类型是用来存储多个有序的字符串
+- 列表中的每个字符串称为元素(element),一个列表最多可以存储2^32-1个元素
+- 列表类型的两个特点:
+- - 列表中的元素是有序的
+- - 列表中的元素可以是重复的
+- lrange 操作会获取列表指定索引范围所有的元素。索引下标有两个特点：
+- - 1. 索引下标从左到右分别是0 到 N-1，但是从右到左分别是-1到-N
+- - 2. lrange 中的end选项包含了自身
+- 内部编码：
+- - 1. ziplist(压缩列表): 当列表的元素个数小于list-max-ziplist-entries 配置(默认512个)，同时列表中每个元素的值都小于list-max-ziplist-value配置时(默认64字节),Redis会选用ziplist来作为列表的内部实现来减少内存的使用
+- - 2. linedlist(链表): 当列表类型无法满足ziplist的条件时，Redis会使用linedlist作为列表的内部实现
+
+> 集合
+
+- 集合(set)类型也是用来保存多个的字符串元素，集合不允许有重复元素，并且集合中的元素是无序的，不能通过索引下标获取元素
+- 一个集合最多可以存储2^32 - 1个元素
+- scard 的时间复杂度为O(1),它不会遍历集合所有元素，而是直接用Redis内部的变量
+- 内部编码：
+- - 1. intset(整数集合)：当集合中的元素都是整数且元素个数小于set-max-intset-entries配置(默认512个)时，Redis会选用intset来作为集合的内部实现，从而减少内存的使用
+- - 2. hashtable(哈希表): 当集合类型无法满足intset的条件时，Redis会使用hastable作为集合的内部实现
+
+> 有序集合
+
+- 有序集合中的元素不能重复，但是score可以重复
+- 有序集合相比集合提供了排序字段，但是也产生了代价，zadd的时间复杂度为O(log (n)),sadd的时间复杂度为O(1)
+- 有序集合是按照分值排名的，zrange是从低到高返回，zrevrange反之。
+- 内部编码：
+- - 1. ziplist(压缩列表)：当有序集合的元素个数小于zset-max-ziplist-entries配置(默认128个)，同时每个元素的值都小于zset-max-ziplist-value配置(默认64字节)时，Redis会用ziplist来作为有序集合的内部实现，ziplist可以有效减少内存的使用
+- - 2. skiplist(跳跃表): 当ziplist条件不满足时，有序集合会使用skiplist作为内部实现，因为此时ziplist的读写效率会下降
+
+> 数据库管理
+
+- select
+- - 切换数据库，Redis默认配置中是由16个数据库
+- - Redis 的分布式实现 Redis Cluster 只允许使用0号数据库
+- - 1. Redis 是单线程的。如果使用多个数据库，那么这些数据库仍然是使用一个CPU，彼此之前还是会受到影响的
+- - 2. 多数据库的使用方式，会让调试和运维不同业务的数据库变的困难，假如有一个慢查询存在，依然会影响其他数据库，这样会使得别的业务方定位问题非常的困难
+- - 3. 部分Redis的客户端根本就不支持这种方式
+- dbsize
+- flushdb/flushall
+- - flushdb/flushall 命令用于清除数据库，两者的区别是flushdb值清除当前数据库，flushall会清除所有数据库
+- - 如果当前数据库键值数量比较多，flushdb/flushall 存在阻塞Redis的可能性
