@@ -21,6 +21,9 @@
 - 6381 执行命令
 ```
 127.0.0.1:6381> slaveof 127.0.0.1 6380
+
+Redis5.0.0 改为 ： replicaof <masterip> <masterport>
+
 ```
 - 6380 启动
 - ![avator](images/redis_6380.png)
@@ -63,7 +66,143 @@
 
 > psync 命令
 
+- 从节点使用psync命令完成部分复制和全量复制功能
 ```
 30227:M 05 Aug 2019 18:52:44.698 * Replica 127.0.0.1:6381 asks for synchronization
 30227:M 05 Aug 2019 18:52:44.698 * Partial resynchronization not accepted: Replication ID mismatch (Replica asked for 'e7d71fb600183a175afadbd1354e97edddb2541a', my replication IDs are 'e24f6e42917e7c162ec45a713b0ee3872005ee8b' and '0000000000000000000000000000000000000000')
+```
+
+
+> 6381 从节点打印分析
+
+```
+31771:S 06 Aug 2019 12:21:40.213 * DB loaded from disk: 0.000 seconds
+31771:S 06 Aug 2019 12:21:40.213 * Before turning into a replica, using my master parameters to synthesize a cached master: I may be able to synchronize with the new master with just a partial transfer.
+#启动成功
+31771:S 06 Aug 2019 12:21:40.213 * Ready to accept connections
+# 开始连接主节点
+31771:S 06 Aug 2019 12:21:40.214 * Connecting to MASTER 127.0.0.1:6380
+# 开始同步
+31771:S 06 Aug 2019 12:21:40.214 * MASTER <-> REPLICA sync started
+31771:S 06 Aug 2019 12:21:40.214 * Non blocking connect for SYNC fired the event.
+31771:S 06 Aug 2019 12:21:40.214 * Master replied to PING, replication can continue...
+# 尝试增量同步
+31771:S 06 Aug 2019 12:21:40.214 * Trying a partial resynchronization (request 668b25f85e84c5900e1032e4b5e1f038f01cfa49:5895).
+# 全量同步
+31771:S 06 Aug 2019 12:21:40.215 * Full resync from master: c88cd043d66193e867929d9d5fadc952954371e5:0
+31771:S 06 Aug 2019 12:21:40.215 * Discarding previously cached master state.
+31771:S 06 Aug 2019 12:21:40.240 * MASTER <-> REPLICA sync: receiving 224 bytes from master
+31771:S 06 Aug 2019 12:21:40.241 * MASTER <-> REPLICA sync: Flushing old data
+31771:S 06 Aug 2019 12:21:40.241 * MASTER <-> REPLICA sync: Loading DB in memory
+31771:S 06 Aug 2019 12:21:40.241 * MASTER <-> REPLICA sync: Finished with success
+```
+
+> 全量复制
+
+- ![avator](images/6-15.png)
+
+- 全量复制是Redis最早支持的复制方式，也是主从第一次建立复制时必须经历的阶段。触发全量复制的命令是sync和psync
+- - 1. 发送psync命令进行数据同步，由于是第一次进行复制，从节点没有复制偏移量和主节点的运行ID，所以发送psync-1
+- - 2. 主节点根据psync-1解析出当前为全量复制，回复+FULLRESYNC响应
+- - 3. 从节点接收主节点的响应数据保存运行ID和偏移量offset
+- - 4. 主节点执行bgsave保存RDB文件到本地
+
+```
+31651:M 06 Aug 2019 11:08:40.802 * Starting BGSAVE for SYNC with target: disk
+31651:M 06 Aug 2019 11:08:40.802 * Background saving started by pid 31676
+31676:C 06 Aug 2019 11:08:40.805 * DB saved on disk
+31676:C 06 Aug 2019 11:08:40.806 * RDB: 0 MB of memory used by copy-on-write
+31651:M 06 Aug 2019 11:08:40.886 * Background saving terminated with success
+31651:M 06 Aug 2019 11:08:40.886 * Synchronization with replica 127.0.0.1:6381 succeeded
+```
+- - 5. 主节点发送RDB给从节点，从节点把接收的RDB文件保存在本地并直接作为从节点的数据文件,接收完RDB后从节点打印相关日志
+
+```
+31645:S 06 Aug 2019 11:08:40.886 * MASTER <-> REPLICA sync: receiving 224 bytes from master
+```
+- - 6. 对于从节点开始接收RDB快照到接收完成期间，主节点仍然响应读写命令，因此主节点会把这期间写命令数据保存在复制客户端缓冲区内，当从节点加载完RDB文件后，主节点再把缓冲区内的数据发送个从节点，保证主从之间数据一致性。
+
+- - redis.conf 配置
+
+```
+client-output-buffer-limit replica 256mb 64mb 60
+```
+- - 如果主节点创建和传输RDB的时间过长，对于高流量写入场景非常容易造成主节点复制客户端缓冲区溢出。默认配置如上所示，如果60秒内缓冲区消耗持续大于64MB或者直接超过256MB时，主节点将直接关闭复制客户端连接，造成全量同步失败
+
+- - 对于主节点，当发送完所有的数据后就认为全量复制完成.
+
+```
+31651:M 06 Aug 2019 11:08:40.886 * Synchronization with replica 127.0.0.1:6381 succeeded
+```
+- - 7. 从节点接收完主节点传送来的全部数据后会清空自身旧数据
+
+```
+31645:S 06 Aug 2019 11:08:40.886 * MASTER <-> REPLICA sync: Flushing old data
+```
+
+- - 8. 从节点清空数据后开始加载RDB文件，对于较大的RDB文件，这一步操作依然比较耗时，可以通过计算日志之间的时间差来判断加载RDB的总耗时
+
+```
+31645:S 06 Aug 2019 11:08:40.886 * MASTER <-> REPLICA sync: Loading DB in memory
+31645:S 06 Aug 2019 11:08:40.886 * MASTER <-> REPLICA sync: Finished with success
+```
+
+- - 9. 从节点成功加载完RDB后，如果当前节点开启了AOF持久化功能，它会立刻做bgrewriteaof操作，为了保证全量复制后AOF持久化文件立刻可用。
+
+- 全量复制耗时的原因：
+- - 主节点bgsave时间
+- - RDB文件网络传输时间
+- - 从节点清空数据时间
+- - 可能的AOF重写时间
+
+- 以下为Redis 3.0才会有
+
+|标识 | 含义 |
+|-- | -- |
+|M | 当前为主节点日志 |
+|S | 当前为从节点日志 |
+|C | 子进程日志 |
+
+> 部分复制
+- 部分复制主要是Redis针对全量复制的过高开销做出的一种优化措施，使用psync {runId}{offset}命令实现。当从节点(slave)正在复制主节点(master)时，如果出现网络闪断或者命令丢失等异常情况时，从节点会向主节点要求补发丢失的命令数据，如果主节点的复制积压缓冲区内存咋这部分数据则直接发送给从节点，这样就可以保持主从节点复制的一致性。补发的这部分数据一般远远小于全量数据.
+
+- - 1. 当主节点直接网络出现中断是，如果超过repl-timeout时间，主节点会认为从节点故障并中断复制连接
+
+```
+31767:M 06 Aug 2019 14:13:26.096 # Connection with replica 127.0.0.1:6381 lost.
+```
+- - 2. 主从连接中断期间主节点依然响应命令，但因复制连接中断命令无法发送给从节点，不过主节点内部存在的复制积压缓冲区，依然可以保存最近一段时间的写命令数据，默认最大缓存1MB，可以通过into replication 查看
+- - 3. 当从节点网络恢复后，从节点会再次连上主节点
+
+```
+从节点打印：
+31934:S 06 Aug 2019 14:20:54.745 * MASTER <-> REPLICA sync started
+31934:S 06 Aug 2019 14:20:54.745 * Non blocking connect for SYNC fired the event.
+31934:S 06 Aug 2019 14:20:54.745 * Master replied to PING, replication can continue...
+31934:S 06 Aug 2019 14:20:54.745 * Trying a partial resynchronization (request c88cd043d66193e867929d9d5fadc952954371e5:9996).
+31934:S 06 Aug 2019 14:20:54.746 * Successful partial resynchronization with master.
+31934:S 06 Aug 2019 14:20:54.746 * MASTER <-> REPLICA sync: Master accepted a Partial Resynchronization.
+
+主节点打印：
+31767:M 06 Aug 2019 14:21:49.065 * Replica 127.0.0.1:6381 asks for synchronization
+31767:M 06 Aug 2019 14:21:49.066 * Partial resynchronization request from 127.0.0.1:6381 accepted. Sending 0 bytes of backlog starting from offset 10066.
+```
+
+- - 4. 当主从连接恢复后，由于从节点之前保存了自身已复制的偏移量和主节点的运行ID。因此会把它们当做psync参数发送个主节点，要求进行部分复制操作.从节点对应日志：
+
+```
+31938:S 06 Aug 2019 14:21:49.065 * Trying a partial resynchronization (request c88cd043d66193e867929d9d5fadc952954371e5:10066).
+```
+
+- - 5. 主节点接到psync命令后首先核对参数runId是否与自身一致，如果一致，说明之前复制的是当前主节点；之后根据参数offset在自身复制积压缓冲区查找，如果偏移量之后的数据存在缓冲区中，则对从节点发送+COUTINUE响应，表示可以进行部分复制。从节点接到回复打印如下：
+
+```
+31938:S 06 Aug 2019 14:21:49.066 * Successful partial resynchronization with master.
+31938:S 06 Aug 2019 14:21:49.066 * MASTER <-> REPLICA sync: Master accepted a Partial Resynchronization.
+```
+- - 6. 主节点根据偏移量把复制积压缓冲区里的数据发送给从节点，保证主从复制进入正常状态。发送的数据量可以在主节点的日志获取
+
+```
+31767:M 06 Aug 2019 14:21:49.065 * Replica 127.0.0.1:6381 asks for synchronization
+31767:M 06 Aug 2019 14:21:49.066 * Partial resynchronization request from 127.0.0.1:6381 accepted. Sending 0 bytes of backlog starting from offset 10066.
 ```
