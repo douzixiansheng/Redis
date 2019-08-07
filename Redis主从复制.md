@@ -209,3 +209,19 @@ client-output-buffer-limit replica 256mb 64mb 60
 31767:M 06 Aug 2019 14:21:49.065 * Replica 127.0.0.1:6381 asks for synchronization
 31767:M 06 Aug 2019 14:21:49.066 * Partial resynchronization request from 127.0.0.1:6381 accepted. Sending 0 bytes of backlog starting from offset 10066.
 ```
+
+> 心跳
+
+- 主从节点在建立复制后,它们之间维护着长连接并彼此发送心跳命令
+- 主从心跳判断机制：
+- - 1. 主从节点彼此都有心跳检测机制，各自模拟对方的客户端进行通信，主节点的连接状态为flags=M,从节点连接状态为flags=S
+- - 2. 主节点默认每隔10秒对从节点发送ping命令，判断从节点的存活性和连接状态。可以通过repl-ping-replica-period 10 控制发送频率
+- - 3. 从节点在主线程中每隔一秒发送replconf ack{offset} 命令，给主节点上报自身当前的复制偏移量。主节点根据replconf命令判断从节点超时时间，体现在info replication 统计中的lag信息中，lag表示从节点最后一次通信延迟的秒数，正常延迟应该在0到1之间。如果超过repl-timeout配置的值(默认60秒),则判定从节点下线并断开复制客户端连接。即使主节点判定从节点下线后，如果从节点重新恢复，心跳检测和继续执行.
+
+> 异步复制
+
+- 主节点不但负责数据读写，还负责把写命令同步给从节点。写命令的发送过程是异步完成，也就是说主节点自身处理完写命令后直接返回给客户端，并不等待从节点复制完成。
+
+> 读写分离
+- 对于读占比较高的场景，可以通过把一部分读流量分摊到从节点(slave)来减轻主节点(master)压力，同时需要注意永远只对主节点执行写操作
+- 建议大家在做读写分离之前，可以考虑使用Redis Cluster 等分布式解决方案
